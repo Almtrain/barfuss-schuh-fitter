@@ -66,7 +66,7 @@ export async function POST(request: Request) {
       {
         role: "system",
         content:
-          "Du bist ein Messassistent fuer einen Barfussschuh-MVP. Gib nur gueltiges JSON aus. Wenn ein A4-Blatt oder eine andere klare Referenz sichtbar ist, schaetze Laengen in Millimetern aktiv. Unsicherheit wird ueber measurementConfidence und notes markiert, nicht durch leere Werte, ausser eine Kante ist wirklich nicht sichtbar.",
+          "Du bist ein Mess- und Formanalyse-Assistent fuer einen Barfussschuh-Fitter MVP. Es gibt zwei Use Cases: 1) Kunde erfasst seinen Fuss mit Top-Foto und Seitenfoto auf A4-Referenz. 2) Schuhverkaeufer erfasst ein Schuhmodell/eine Groesse mit Top-Foto der Einlegesohle oder Schuhform und Seitenfoto des Schuhs. Deine Aufgabe in diesem API-Schritt ist nur Messwerte, Formmerkmale und Unsicherheit aus dem aktuellen Foto zu liefern. Du machst noch kein finales Matching zwischen Kunde und Schuh. Gib nur gueltiges JSON aus.",
       },
       {
         role: "user",
@@ -113,23 +113,39 @@ function buildPrompt(targetType: "foot" | "shoe", photoType: "top" | "side") {
 
   if (targetType === "shoe") {
     const topInstruction =
-      "Top-Foto: Schaetze die nutzbare Innenlaenge und maximale nutzbare Vorfussbreite. Bei Einlegesohle direkt messen. Bei Aussenschuh sichtbar: Innenraum konservativ aus Aussenform minus Rand/Materialstaerke schaetzen.";
+      "Aktueller Prozesskontext: Schuh erfassen durch Schuhverkaeufer. Top-Foto: Schaetze fuer dieses konkrete Schuhmodell/diese Groesse die nutzbare Innenlaenge und maximale nutzbare Vorfussbreite. Bei Einlegesohle direkt messen. Bei Aussenschuh sichtbar: Innenraum konservativ aus Aussenform minus Rand/Materialstaerke schaetzen.";
     const sideInstruction =
-      "Seitenfoto: Schaetze Volumen/Rist-Risiko und, falls moeglich, Rist55-Kompatibilitaet. Laenge/Breite duerfen vom Top-Foto unbekannt bleiben, wenn seitlich nicht sichtbar.";
+      "Aktueller Prozesskontext: Schuh erfassen durch Schuhverkaeufer. Seitenfoto: Schaetze Schuhvolumen, Konstruktion und Rist-/Spann-Risiko des Schuhs. Laenge/Breite duerfen vom Top-Foto unbekannt bleiben, wenn sie seitlich nicht sichtbar sind.";
 
     return `${reference}
-Zielobjekt: Schuhreferenz fuer Barfussschuh-Fitting.
+Zielobjekt: ShoeReference. Diese Daten beschreiben den Schuh, nicht die Passform fuer einen konkreten Kunden.
 Fotoart: ${photoType === "top" ? "von oben" : "von der Seite"}.
 ${photoType === "top" ? topInstruction : sideInstruction}
+Fachliche Bedeutung der Felder:
+- footLengthMm: bei ShoeReference die geschaetzte nutzbare Innenlaenge des Schuhs/der Einlegesohle in mm.
+- footWidthMm: bei ShoeReference die geschaetzte maximale nutzbare Vorfuss-/Ballenbreite in mm.
+- toeShape: Zehenbox-/Vorfussform des Schuhs. "fan" = breit auffaechernd, "straight" = eher gerade, "slope" = deutlich schraeg zulaufend.
+- rist55Mm: nur wenn aus dem Seitenfoto sinnvoll schaetzbar; sonst null.
+- checks.length und checks.width: bei ShoeReference keine Kundenpassform. Nutze "unbekannt", ausser du willst eine reine Messqualitaetswarnung ausdruecken.
+- checks.toeBox: "passend" bedeutet zehenfreundliche/breite Barfuss-Zehenbox, "kritisch" bedeutet eng/spitz/schmal.
+- checks.instep: Risiko, dass der Schuh fuer hohe Riste/hohen Spann knapp wird.
+- recommendation: kurze fachliche Zusammenfassung der Schuhreferenz, keine Kaufempfehlung fuer einen Kunden.
 Gib bei sichtbarer A4-Referenz numerische mm-Schaetzungen aus. Verwende low confidence, wenn perspektivisch unsicher, aber liefere dennoch eine plausible Schaetzung, wenn die Kontur erkennbar ist.
 JSON-Schema: { "mode": "openai", "measurementConfidence": "low|medium|high", "footLengthMm": number|null, "footWidthMm": number|null, "toeShape": "straight|slope|fan|unknown", "rist55Mm": number|null, "recommendation": string, "checks": { "length": "passt|knapp|zu kurz|unbekannt", "width": "passt|knapp|zu schmal|unbekannt", "toeBox": "passend|kritisch|unbekannt", "instep": "niedriges Risiko|mittleres Risiko|hohes Risiko|unbekannt" }, "notes": string[] }`;
   }
 
   return `${reference}
-Zielobjekt: Kundenfuss.
+Zielobjekt: FootScan. Diese Daten beschreiben den Fuss eines Kunden, nicht direkt einen Schuh.
 Fotoart: ${photoType === "top" ? "von oben" : "von der Seite"}.
 Top-Foto: Schaetze Fusslaenge, maximale Fussbreite und Zehenform.
 Seitenfoto: Schaetze Rist55 an 55% der Fusslaenge ab Ferse Richtung Zehen.
+Fachliche Bedeutung der Felder:
+- footLengthMm: Fusslaenge in mm.
+- footWidthMm: maximale Fussbreite in mm.
+- toeShape: Zehenform des Fusses. "fan" = auffaechernde Zehen, "straight" = eher gerade, "slope" = schraeg abfallend.
+- rist55Mm: vertikale Hoehe vom Boden bis Fussoberkante bei 55% der Fusslaenge ab Ferse.
+- checks: beim FootScan nur qualitative Hinweise zur Messbarkeit/Risiko, noch kein finales Matching.
+- recommendation: kurze Zusammenfassung der Fussmessung, keine finale Schuh-Empfehlung.
 Gib bei sichtbarer A4-Referenz numerische mm-Schaetzungen aus. Verwende low confidence, wenn perspektivisch unsicher, aber liefere dennoch eine plausible Schaetzung, wenn Fuss und Blatt erkennbar sind.
 JSON-Schema: { "mode": "openai", "measurementConfidence": "low|medium|high", "footLengthMm": number|null, "footWidthMm": number|null, "toeShape": "straight|slope|fan|unknown", "rist55Mm": number|null, "recommendation": string, "checks": { "length": "passt|knapp|zu kurz|unbekannt", "width": "passt|knapp|zu schmal|unbekannt", "toeBox": "passend|kritisch|unbekannt", "instep": "niedriges Risiko|mittleres Risiko|hohes Risiko|unbekannt" }, "notes": string[] }`;
 }
