@@ -6,6 +6,7 @@ import { demoAnalysis } from "@/lib/fit-analysis";
 const requestSchema = z.object({
   imageUrl: z.string().url().optional(),
   photoType: z.enum(["top", "side"]).default("top"),
+  targetType: z.enum(["foot", "shoe"]).default("foot"),
 });
 
 export async function POST(request: Request) {
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
         content: [
           {
             type: "text",
-            text: `Analysiere dieses ${parsed.data.photoType === "top" ? "Top-Foto" : "Seitenfoto"} fuer den Barfuss-Schuh-Fitter MVP. Nutze A4 als Referenz, falls sichtbar. Schema: { "mode": "openai", "measurementConfidence": "low|medium|high", "footLengthMm": number|null, "footWidthMm": number|null, "toeShape": "straight|slope|fan|unknown", "rist55Mm": number|null, "recommendation": string, "checks": { "length": "passt|knapp|zu kurz|unbekannt", "width": "passt|knapp|zu schmal|unbekannt", "toeBox": "passend|kritisch|unbekannt", "instep": "niedriges Risiko|mittleres Risiko|hohes Risiko|unbekannt" }, "notes": string[] }`,
+            text: `Analysiere dieses ${parsed.data.photoType === "top" ? "Top-Foto" : "Seitenfoto"} fuer den Barfuss-Schuh-Fitter MVP. Zielobjekt: ${parsed.data.targetType === "shoe" ? "Schuhreferenz oder Einlegesohle" : "Kundenfuss"}. Nutze A4 als Referenz, falls sichtbar. Bei Schuhen bedeuten footLengthMm und footWidthMm die geschaetzte nutzbare Innenlaenge und Innenbreite. Schema: { "mode": "openai", "measurementConfidence": "low|medium|high", "footLengthMm": number|null, "footWidthMm": number|null, "toeShape": "straight|slope|fan|unknown", "rist55Mm": number|null, "recommendation": string, "checks": { "length": "passt|knapp|zu kurz|unbekannt", "width": "passt|knapp|zu schmal|unbekannt", "toeBox": "passend|kritisch|unbekannt", "instep": "niedriges Risiko|mittleres Risiko|hohes Risiko|unbekannt" }, "notes": string[] }`,
           },
           {
             type: "image_url",
