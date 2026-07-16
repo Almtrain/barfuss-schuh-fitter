@@ -24,6 +24,16 @@ type UploadResult = {
   message: string;
 };
 
+type PhotoState = {
+  file: File | null;
+  previewUrl: string | null;
+};
+
+const emptyPhoto: PhotoState = {
+  file: null,
+  previewUrl: null,
+};
+
 const flowCopy = {
   customer: {
     title: "Kunde",
@@ -33,7 +43,7 @@ const flowCopy = {
   shop: {
     title: "Shop",
     intro:
-      "Schuh oder Einlegesohle fotografieren, nutzbare Innenmasse schaetzen lassen und als ShoeReference speichern.",
+      "Marke, Modell und Groesse erfassen. Danach zwei Pflichtfotos aufnehmen: oben und seitlich.",
   },
 };
 
@@ -50,22 +60,25 @@ const photoCopy: Record<Flow, Record<PhotoType, { title: string; body: string }>
   },
   shop: {
     top: {
-      title: "Einlegesohle oder Schuh von oben",
-      body: "Wenn moeglich Einlegesohle fotografieren. Sonst Innenschuh oder Aussenschuh von oben fotografieren und Messquelle passend setzen.",
+      title: "Foto 1: von oben",
+      body: "Einlegesohle auf ein A4-Blatt legen. Falls keine Einlegesohle moeglich ist: Schuh von oben fotografieren und Messquelle auf Aussenschuh geschaetzt setzen.",
     },
     side: {
-      title: "Schuh von der Seite",
-      body: "Schuh seitlich fotografieren, damit Volumen/Rist-Risiko als Modellwissen erfasst werden kann.",
+      title: "Foto 2: von der Seite",
+      body: "Schuh seitlich auf gleicher Flaeche fotografieren. Dieses Foto hilft fuer Volumen, Rist und Konstruktion.",
     },
   },
 };
 
 export default function Home() {
   const [flow, setFlow] = useState<Flow>("customer");
-  const [photoType, setPhotoType] = useState<PhotoType>("top");
-  const [file, setFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [customerPhotoType, setCustomerPhotoType] = useState<PhotoType>("top");
+  const [customerPhoto, setCustomerPhoto] = useState<PhotoState>(emptyPhoto);
+  const [shopPhotos, setShopPhotos] = useState<Record<PhotoType, PhotoState>>({
+    top: emptyPhoto,
+    side: emptyPhoto,
+  });
+  const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<FitAnalysis | null>(null);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -79,8 +92,6 @@ export default function Home() {
     useState<MeasurementSource>("insole");
   const [staffNotes, setStaffNotes] = useState("");
 
-  const selectedCopy = photoCopy[flow][photoType];
-
   function resetResult() {
     setUploadResult(null);
     setAnalysis(null);
@@ -88,75 +99,50 @@ export default function Home() {
     setError(null);
   }
 
+  function clearPhoto(photo: PhotoState) {
+    if (photo.previewUrl) {
+      URL.revokeObjectURL(photo.previewUrl);
+    }
+  }
+
   function handleFlowChange(nextFlow: Flow) {
     setFlow(nextFlow);
-    setPhotoType("top");
-    handleFileChange(null);
     resetResult();
   }
 
-  function handleFileChange(nextFile: File | null) {
-    setFile(nextFile);
+  function setCustomerFile(nextFile: File | null) {
+    clearPhoto(customerPhoto);
+    setCustomerPhoto({
+      file: nextFile,
+      previewUrl: nextFile ? URL.createObjectURL(nextFile) : null,
+    });
     resetResult();
+  }
 
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-    }
-
-    setPreviewUrl(nextFile ? URL.createObjectURL(nextFile) : null);
+  function setShopFile(type: PhotoType, nextFile: File | null) {
+    clearPhoto(shopPhotos[type]);
+    setShopPhotos((current) => ({
+      ...current,
+      [type]: {
+        file: nextFile,
+        previewUrl: nextFile ? URL.createObjectURL(nextFile) : null,
+      },
+    }));
+    resetResult();
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-
-    if (!file) {
-      setError("Bitte zuerst ein Foto auswaehlen.");
-      return;
-    }
-
-    if (flow === "shop" && (!brand || !model || !euSize)) {
-      setError("Bitte Marke, Modell und Groesse erfassen.");
-      return;
-    }
-
     setIsLoading(true);
     setError(null);
     setSavedId(null);
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("photoType", `${flow}/${photoType}`);
-
-      const uploadResponse = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-      const uploadJson = await uploadResponse.json();
-
-      if (!uploadResponse.ok) {
-        throw new Error(uploadJson.error || "Upload fehlgeschlagen.");
+      if (flow === "customer") {
+        await submitCustomerFlow();
+      } else {
+        await submitShopFlow();
       }
-
-      setUploadResult(uploadJson);
-
-      const analyzeResponse = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageUrl: uploadJson.imageUrl || undefined,
-          photoType,
-          targetType: flow === "shop" ? "shoe" : "foot",
-        }),
-      });
-      const analyzeJson = await analyzeResponse.json();
-
-      if (!analyzeResponse.ok) {
-        throw new Error(analyzeJson.error || "Analyse fehlgeschlagen.");
-      }
-
-      setAnalysis(analyzeJson);
-      await saveObject(analyzeJson, uploadJson);
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -168,33 +154,27 @@ export default function Home() {
     }
   }
 
-  async function saveObject(nextAnalysis: FitAnalysis, nextUpload: UploadResult) {
-    const endpoint = flow === "customer" ? "/api/foot-scans" : "/api/shoe-references";
-    const body =
-      flow === "customer"
-        ? {
-            customerLabel,
-            topPhotoPath: photoType === "top" ? nextUpload.path : null,
-            sidePhotoPath: photoType === "side" ? nextUpload.path : null,
-            analysis: nextAnalysis,
-            rawAnalysis: nextAnalysis,
-          }
-        : {
-            brand,
-            model,
-            euSize,
-            measurementSource,
-            topPhotoPath: photoType === "top" ? nextUpload.path : null,
-            sidePhotoPath: photoType === "side" ? nextUpload.path : null,
-            staffNotes,
-            analysis: nextAnalysis,
-            rawAnalysis: nextAnalysis,
-          };
+  async function submitCustomerFlow() {
+    if (!customerPhoto.file) {
+      throw new Error("Bitte zuerst ein Foto auswaehlen.");
+    }
 
-    const saveResponse = await fetch(endpoint, {
+    const upload = await uploadPhoto(customerPhoto.file, `customer/${customerPhotoType}`);
+    const nextAnalysis = await analyzePhoto(upload.imageUrl, customerPhotoType, "foot");
+
+    setUploadResult(upload.message);
+    setAnalysis(nextAnalysis);
+
+    const saveResponse = await fetch("/api/foot-scans", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        customerLabel,
+        topPhotoPath: customerPhotoType === "top" ? upload.path : null,
+        sidePhotoPath: customerPhotoType === "side" ? upload.path : null,
+        analysis: nextAnalysis,
+        rawAnalysis: nextAnalysis,
+      }),
     });
     const saveJson = await saveResponse.json();
 
@@ -203,6 +183,92 @@ export default function Home() {
     }
 
     setSavedId(saveJson.id || "demo");
+  }
+
+  async function submitShopFlow() {
+    if (!brand || !model || !euSize) {
+      throw new Error("Bitte Marke, Modell und Groesse erfassen.");
+    }
+
+    if (!shopPhotos.top.file || !shopPhotos.side.file) {
+      throw new Error("Bitte beide Pflichtfotos erfassen: oben und seitlich.");
+    }
+
+    const topUpload = await uploadPhoto(shopPhotos.top.file, "shop/top");
+    const sideUpload = await uploadPhoto(shopPhotos.side.file, "shop/side");
+    const topAnalysis = await analyzePhoto(topUpload.imageUrl, "top", "shoe");
+    const sideAnalysis = await analyzePhoto(sideUpload.imageUrl, "side", "shoe");
+    const combinedAnalysis = combineShoeAnalyses(topAnalysis, sideAnalysis);
+
+    setUploadResult("Beide Schuhfotos wurden gespeichert.");
+    setAnalysis(combinedAnalysis);
+
+    const saveResponse = await fetch("/api/shoe-references", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        brand,
+        model,
+        euSize,
+        measurementSource,
+        topPhotoPath: topUpload.path,
+        sidePhotoPath: sideUpload.path,
+        staffNotes,
+        analysis: combinedAnalysis,
+        rawAnalysis: {
+          top: topAnalysis,
+          side: sideAnalysis,
+        },
+      }),
+    });
+    const saveJson = await saveResponse.json();
+
+    if (!saveResponse.ok) {
+      throw new Error(saveJson.error || "Speichern fehlgeschlagen.");
+    }
+
+    setSavedId(saveJson.id || "demo");
+  }
+
+  async function uploadPhoto(file: File, photoType: string) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("photoType", photoType);
+
+    const uploadResponse = await fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    });
+    const uploadJson = await uploadResponse.json();
+
+    if (!uploadResponse.ok) {
+      throw new Error(uploadJson.error || "Upload fehlgeschlagen.");
+    }
+
+    return uploadJson as UploadResult;
+  }
+
+  async function analyzePhoto(
+    imageUrl: string | null,
+    photoType: PhotoType,
+    targetType: "foot" | "shoe",
+  ) {
+    const analyzeResponse = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        imageUrl: imageUrl || undefined,
+        photoType,
+        targetType,
+      }),
+    });
+    const analyzeJson = await analyzeResponse.json();
+
+    if (!analyzeResponse.ok) {
+      throw new Error(analyzeJson.error || "Analyse fehlgeschlagen.");
+    }
+
+    return analyzeJson as FitAnalysis;
   }
 
   return (
@@ -228,7 +294,7 @@ export default function Home() {
                 Matching-Logik.
               </p>
               <div className="grid gap-3 text-sm">
-                <InfoItem label="Shop" value="ShoeReference erfassen" />
+                <InfoItem label="Shop" value="ShoeReference mit 2 Fotos" />
                 <InfoItem label="Kunde" value="FootScan erfassen" />
                 <InfoItem label="Matching" value="Business-Regeln versionieren" />
               </div>
@@ -269,87 +335,30 @@ export default function Home() {
             </div>
 
             {flow === "customer" ? (
-              <label className="mb-4 block">
-                <span className="mb-1 block text-sm font-medium">Kundenlabel</span>
-                <input
-                  className="w-full rounded-md border border-ink/14 px-3 py-2"
-                  onChange={(event) => setCustomerLabel(event.target.value)}
-                  placeholder="z.B. Testkunde Laden A"
-                  value={customerLabel}
-                />
-              </label>
-            ) : (
-              <div className="mb-4 grid gap-3 md:grid-cols-3">
-                <TextInput label="Marke" onChange={setBrand} value={brand} />
-                <TextInput label="Modell" onChange={setModel} value={model} />
-                <TextInput label="EU Groesse" onChange={setEuSize} value={euSize} />
-                <label className="md:col-span-2">
-                  <span className="mb-1 block text-sm font-medium">Messquelle</span>
-                  <select
-                    className="w-full rounded-md border border-ink/14 px-3 py-2"
-                    onChange={(event) =>
-                      setMeasurementSource(event.target.value as MeasurementSource)
-                    }
-                    value={measurementSource}
-                  >
-                    <option value="insole">Einlegesohle</option>
-                    <option value="inside_shoe">Innenschuh</option>
-                    <option value="outsole_estimated">Aussenschuh geschaetzt</option>
-                  </select>
-                </label>
-                <TextInput label="Notiz" onChange={setStaffNotes} value={staffNotes} />
-              </div>
-            )}
-
-            <div className="mb-5 flex flex-wrap gap-2">
-              {(["top", "side"] as PhotoType[]).map((type) => (
-                <button
-                  className={`rounded-md border px-4 py-2 text-sm font-medium ${
-                    photoType === type
-                      ? "border-leaf bg-leaf text-white"
-                      : "border-ink/12 bg-white text-ink"
-                  }`}
-                  key={type}
-                  onClick={() => {
-                    setPhotoType(type);
-                    handleFileChange(null);
-                  }}
-                  type="button"
-                >
-                  {photoCopy[flow][type].title}
-                </button>
-              ))}
-            </div>
-
-            <div className="mb-5 rounded-md bg-mist p-4">
-              <h2 className="mb-2 text-xl font-semibold">{selectedCopy.title}</h2>
-              <p className="leading-6 text-ink/74">{selectedCopy.body}</p>
-            </div>
-
-            <label className="flex min-h-52 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-ink/24 bg-white p-4 text-center">
-              {previewUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  alt="Ausgewaehltes Foto"
-                  className="max-h-72 rounded-md object-contain"
-                  src={previewUrl}
-                />
-              ) : (
-                <div className="flex flex-col items-center gap-3 text-ink/68">
-                  <Camera size={34} />
-                  <span>Foto aufnehmen oder auswaehlen</span>
-                </div>
-              )}
-              <input
-                accept="image/*"
-                capture="environment"
-                className="sr-only"
-                onChange={(event) =>
-                  handleFileChange(event.target.files?.[0] || null)
-                }
-                type="file"
+              <CustomerCapture
+                customerLabel={customerLabel}
+                onCustomerLabelChange={setCustomerLabel}
+                onPhotoChange={setCustomerFile}
+                onPhotoTypeChange={setCustomerPhotoType}
+                photo={customerPhoto}
+                photoType={customerPhotoType}
               />
-            </label>
+            ) : (
+              <ShopCapture
+                brand={brand}
+                euSize={euSize}
+                measurementSource={measurementSource}
+                model={model}
+                onBrandChange={setBrand}
+                onEuSizeChange={setEuSize}
+                onMeasurementSourceChange={setMeasurementSource}
+                onModelChange={setModel}
+                onPhotoChange={setShopFile}
+                onStaffNotesChange={setStaffNotes}
+                photos={shopPhotos}
+                staffNotes={staffNotes}
+              />
+            )}
 
             {error ? (
               <p className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -367,7 +376,7 @@ export default function Home() {
               ) : (
                 <Upload size={18} />
               )}
-              {isLoading ? "Analysiere und speichere..." : "Foto erfassen"}
+              {isLoading ? "Analysiere und speichere..." : "Speichern"}
             </button>
           </form>
 
@@ -379,7 +388,7 @@ export default function Home() {
 
             {uploadResult ? (
               <p className="mb-3 rounded-md bg-mist px-3 py-2 text-sm text-ink/76">
-                {uploadResult.message}
+                {uploadResult}
               </p>
             ) : null}
 
@@ -404,6 +413,205 @@ export default function Home() {
       </section>
     </main>
   );
+}
+
+function CustomerCapture({
+  customerLabel,
+  onCustomerLabelChange,
+  onPhotoChange,
+  onPhotoTypeChange,
+  photo,
+  photoType,
+}: {
+  customerLabel: string;
+  onCustomerLabelChange: (value: string) => void;
+  onPhotoChange: (file: File | null) => void;
+  onPhotoTypeChange: (value: PhotoType) => void;
+  photo: PhotoState;
+  photoType: PhotoType;
+}) {
+  return (
+    <>
+      <label className="mb-4 block">
+        <span className="mb-1 block text-sm font-medium">Kundenlabel</span>
+        <input
+          className="w-full rounded-md border border-ink/14 px-3 py-2"
+          onChange={(event) => onCustomerLabelChange(event.target.value)}
+          placeholder="z.B. Testkunde Laden A"
+          value={customerLabel}
+        />
+      </label>
+
+      <div className="mb-5 flex flex-wrap gap-2">
+        {(["top", "side"] as PhotoType[]).map((type) => (
+          <button
+            className={`rounded-md border px-4 py-2 text-sm font-medium ${
+              photoType === type
+                ? "border-leaf bg-leaf text-white"
+                : "border-ink/12 bg-white text-ink"
+            }`}
+            key={type}
+            onClick={() => onPhotoTypeChange(type)}
+            type="button"
+          >
+            {photoCopy.customer[type].title}
+          </button>
+        ))}
+      </div>
+
+      <PhotoInput
+        body={photoCopy.customer[photoType].body}
+        onChange={onPhotoChange}
+        photo={photo}
+        title={photoCopy.customer[photoType].title}
+      />
+    </>
+  );
+}
+
+function ShopCapture({
+  brand,
+  euSize,
+  measurementSource,
+  model,
+  onBrandChange,
+  onEuSizeChange,
+  onMeasurementSourceChange,
+  onModelChange,
+  onPhotoChange,
+  onStaffNotesChange,
+  photos,
+  staffNotes,
+}: {
+  brand: string;
+  euSize: string;
+  measurementSource: MeasurementSource;
+  model: string;
+  onBrandChange: (value: string) => void;
+  onEuSizeChange: (value: string) => void;
+  onMeasurementSourceChange: (value: MeasurementSource) => void;
+  onModelChange: (value: string) => void;
+  onPhotoChange: (type: PhotoType, file: File | null) => void;
+  onStaffNotesChange: (value: string) => void;
+  photos: Record<PhotoType, PhotoState>;
+  staffNotes: string;
+}) {
+  return (
+    <>
+      <div className="mb-4 grid gap-3 md:grid-cols-3">
+        <TextInput label="Marke" onChange={onBrandChange} value={brand} />
+        <TextInput label="Modell" onChange={onModelChange} value={model} />
+        <TextInput label="EU Groesse" onChange={onEuSizeChange} value={euSize} />
+        <label className="md:col-span-2">
+          <span className="mb-1 block text-sm font-medium">Messquelle oben</span>
+          <select
+            className="w-full rounded-md border border-ink/14 px-3 py-2"
+            onChange={(event) =>
+              onMeasurementSourceChange(event.target.value as MeasurementSource)
+            }
+            value={measurementSource}
+          >
+            <option value="insole">Einlegesohle auf A4</option>
+            <option value="inside_shoe">Innenschuh von oben</option>
+            <option value="outsole_estimated">Aussenschuh geschaetzt</option>
+          </select>
+        </label>
+        <TextInput label="Notiz" onChange={onStaffNotesChange} value={staffNotes} />
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <PhotoInput
+          body={photoCopy.shop.top.body}
+          onChange={(file) => onPhotoChange("top", file)}
+          photo={photos.top}
+          required
+          title={photoCopy.shop.top.title}
+        />
+        <PhotoInput
+          body={photoCopy.shop.side.body}
+          onChange={(file) => onPhotoChange("side", file)}
+          photo={photos.side}
+          required
+          title={photoCopy.shop.side.title}
+        />
+      </div>
+    </>
+  );
+}
+
+function PhotoInput({
+  body,
+  onChange,
+  photo,
+  required = false,
+  title,
+}: {
+  body: string;
+  onChange: (file: File | null) => void;
+  photo: PhotoState;
+  required?: boolean;
+  title: string;
+}) {
+  return (
+    <div>
+      <div className="mb-3 rounded-md bg-mist p-4">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          {required ? (
+            <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-ink/58">
+              Pflicht
+            </span>
+          ) : null}
+        </div>
+        <p className="leading-6 text-ink/74">{body}</p>
+      </div>
+
+      <label className="flex min-h-52 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-ink/24 bg-white p-4 text-center">
+        {photo.previewUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            alt="Ausgewaehltes Foto"
+            className="max-h-72 rounded-md object-contain"
+            src={photo.previewUrl}
+          />
+        ) : (
+          <div className="flex flex-col items-center gap-3 text-ink/68">
+            <Camera size={34} />
+            <span>Foto aufnehmen oder auswaehlen</span>
+          </div>
+        )}
+        <input
+          accept="image/*"
+          capture="environment"
+          className="sr-only"
+          onChange={(event) => onChange(event.target.files?.[0] || null)}
+          type="file"
+        />
+      </label>
+    </div>
+  );
+}
+
+function combineShoeAnalyses(top: FitAnalysis, side: FitAnalysis): FitAnalysis {
+  return {
+    ...top,
+    measurementConfidence:
+      top.measurementConfidence === "high" && side.measurementConfidence === "high"
+        ? "high"
+        : top.measurementConfidence === "low" || side.measurementConfidence === "low"
+          ? "low"
+          : "medium",
+    rist55Mm: side.rist55Mm ?? top.rist55Mm,
+    checks: {
+      ...top.checks,
+      instep: side.checks.instep,
+    },
+    notes: [
+      ...top.notes,
+      ...side.notes,
+      "Schuhreferenz wurde aus Top- und Seitenfoto kombiniert.",
+    ],
+  };
 }
 
 function FlowButton({
